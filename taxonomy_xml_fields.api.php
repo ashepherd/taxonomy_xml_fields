@@ -20,5 +20,6 @@
  *   
  *   i.e. $namespaces['skos'] = 'http://www.w3.org/2004/02/skos/core#';
  */
-function hook_taxonomy_xml_fields_namespaces(&$namespaces) {
+function hook_taxonomy_xml_fields_namespaces($namepsaces) {
+  return $namespaces;
 }
