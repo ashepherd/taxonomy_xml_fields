@@ -225,9 +225,8 @@ function taxonomy_xml_fields_get_values($values, $store_name) {
 
 function taxonomy_xml_fields_get_namespaces($vid) {
   $ns_id = TAXONOMY_XML_FIELDS_NAMESPACES_VAR . ':' . $vid;
-  $ns = $_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id];
   
-  if (empty($ns) ){
+  if ( empty($_SESSION[TAXONOMY_XML_FIELDS_VAR]) || empty($_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id]) ){
 
     $ns = rdf_get_namespaces();
     $ns['dc'] = 'http://purl.org/dc/elements/1.1/';
@@ -236,8 +235,9 @@ function taxonomy_xml_fields_get_namespaces($vid) {
     module_invoke_all('hook_taxonomy_xml_fields_namespaces', $ns);
 
     taxonomy_xml_fields_set_namespaces($vid, $ns);
+    return $ns;
   }
-  return $ns;
+  return $_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id];
 }
 
 function taxonomy_xml_fields_set_namespaces($vid, $ns){
@@ -254,15 +254,15 @@ function taxonomy_xml_fields_clear_namespaces($vid) {
 
 function taxonomy_xml_fields_get_vocab_terms($vid) {
   $vocab_terms_id = TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR . ':' . $vid;
-  $terms = $_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id];
 
-  if ( empty($terms) ){
+  if ( empty($_SESSION[TAXONOMY_XML_FIELDS_VAR]) || empty($_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id]) ){
     $terms = array(
       TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR => $vid,
     );
     taxonomy_xml_fields_set_vocab_terms($vid, $terms);
+    return $terms;
   }
-  return $terms;
+  return $_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id];
 }
 
 function taxonomy_xml_fields_set_vocab_terms($vid, $terms){
