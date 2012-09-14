@@ -5,10 +5,18 @@ define('TAXONOMY_XML_FIELDS_NAMESPACES_VAR', TAXONOMY_XML_FIELDS_VAR . '_namespa
 define('TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR', TAXONOMY_XML_FIELDS_VAR . '_vocab_terms');
 define('TAXONOMY_XML_FIELDS_PARENTS_VAR', TAXONOMY_XML_FIELDS_VAR . '_parents');
 
+/**
+ * Implements hook_install().
+ */
+function taxonomy_xml_fields_install() {
+  drupal_set_message(t("Taxonomy XML Fields has been installed."));
+}
+
 /*
  * Implements hook_menu()
+ * 
+ * Setup a path to the taxonomy_manager from the taxonomy list
  */
-
 function taxonomy_xml_fields_menu() {
   $items['admin/structure/taxonomy/%/hierarchy'] = array(
     'type' => MENU_LOCAL_TASK,
@@ -35,6 +43,16 @@ function taxonomy_xml_fields_help($path, $arg) {
   }
 }
 
+/**
+ * Redirect the user to taxonomy manager
+ * 
+ * @param $path
+ *   The base URL path to taxonomy manager
+ * @param $taxonomy_name
+ *   The machine name of the taxonomy to manage
+ * @return 
+ *   HTML explaining this module
+ */
 function taxonomy_xml_fields_hierarchy($path, $taxonomy_name) {
   drupal_goto($path . $taxonomy_name);
 }
@@ -49,10 +67,14 @@ function taxonomy_xml_fields_hierarchy($path, $taxonomy_name) {
  * batch queue.
  *
  * Helper function for parser routines
+ * 
+ * If a vocabulary is being updated via taxonomy_xml, 
+ * we need to make sure its children are updated since it avoids updating
+ * children
  *
  * @see taxonomy_xml_add_term_to_batch_queue()
+ * @see taxonomy_xml_add_all_children_to_queue($term)
  * 
- * If a vocabulary is being updated, we need to make sure its children are updated
  */
 function taxonomy_xml_fields_add_all_children_to_queue($term) {
   $parents = taxonomy_xml_fields_get_parents();
@@ -119,7 +141,12 @@ function taxonomy_xml_fields_add_all_children_to_queue($term) {
  * Implements hook_batch_alter(&$batch).
  * 
  * If the bath process is for 'taxonomy_xml' & its type is 'rdf',
- * then modify the batch process to work for this module
+ * then modify the batch process to work for this module.
+ * 
+ * Setup the $_SESSION variable and alter the batch's 'finished' routine
+ * 
+ * @param &$batch
+ *   The batch process to alter
  */
 
 function taxonomy_xml_fields_batch_alter(&$batch) {
@@ -128,6 +155,7 @@ function taxonomy_xml_fields_batch_alter(&$batch) {
     $type = $batch['sets']['0']['operations']['0']['1']['1']['format'];
 
     if ($type == 'rdf') {
+      
       $vocabulary_url = $batch['sets']['0']['operations']['0']['1']['0'];
       $vid = $batch['sets']['0']['operations']['0']['1']['1']['vid'];
 
@@ -137,15 +165,18 @@ function taxonomy_xml_fields_batch_alter(&$batch) {
         'new' => $vid == -1,
       );
 
+      //set the batch's finished routine to a routine we control
       $batch['sets']['0']['finished'] = 'taxonomy_xml_fields_batch_import_finished';
     }
   }
 }
 
 /**
- * Finalization callback when a round is done.
+ * Show the user which fields could be created on the taxonomy vocabulary based on the RDF
  *
  * @ingroup batch_operations
+ * 
+ * @see taxonomy_xml_fields_batch_alter(&$batch)
  */
 function taxonomy_xml_fields_batch_import_finished($success, $results, $operations) {
 
@@ -156,26 +187,29 @@ function taxonomy_xml_fields_batch_import_finished($success, $results, $operatio
 
     $old = array();
 
-    $term_msg = '<p>Based on the vocabulary, you may store more information in your taxonomy terms by creating the following text fields:<br/><ul>';
+    //Display the message that details the field possibilities
+    $term_msg = '<p>Based on the vocabulary, you may store more information in your taxonomy terms '.
+                'by creating the following text fields:<br/><ul>';
     foreach ($terms as $predicate => $field) {
       if ($predicate != TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR) {
         if (!$field['new']) {
           $old[$predicate] = $field;
           continue;
         }
-
-        $term_msg .= '<li><strong>' . $predicate . ' => ' . $field['field'] .
-            ' (# of values: ' . $field['length'] . ', longest text size: ' . $field['size'] . ')</strong></li>';
+        $term_msg .= '<li><strong>' . $predicate . ' => ' . $field['field'] . ' (# of values: ' . $field['length'] . 
+                     ', longest text size: ' . $field['size'] . ')</strong></li>';
       }
     }
 
     if (!empty($old)) {
       $term_msg .= '</ul><br/>Pre-existing taxonomy fields that were populated during this import:<br/><ul>';
       foreach ($old as $predicate => $field) {
-        $term_msg .= '<li>' . $predicate . ' => ' . $field['field'] . ' (# of values: ' . $field['length'] . ', longest text size: ' . $field['size'] . ')</li>';
+        $term_msg .= '<li>' . $predicate . ' => ' . $field['field'] . ' (# of values: ' . $field['length'] . 
+                     ', longest text size: ' . $field['size'] . ')</li>';
       }
     }
-    $term_msg .= '</ul><br/>NOTE: make sure to set the \'Number of values:\' properly for fields above with sizes greater than 1.</p>';
+    $term_msg .= '</ul><br/>NOTE: make sure to set the \'Number of values:\' '.
+                 'properly for fields above with sizes greater than 1.</p>';
 
     drupal_set_message($term_msg);
   }
@@ -187,8 +221,17 @@ function taxonomy_xml_fields_batch_import_finished($success, $results, $operatio
 
 /*
  * Implements hook_taxonomy_term_presave($term). 
+ * 
+ * Before each term is saved, check to see if it is coming from taxonomy_xml
+ * If so, we want to do the following:
+ * 
+ * 1) populate taxonomy term fields whose machine-name corresponds to RDF predicates
+ * 2) document all the term predicates over the entire vocabulary
+ * 
+ * @param $term
+ *   The taxonomy_term to presave
+ *
  */
-
 function taxonomy_xml_fields_taxonomy_term_presave($term) {
 
   //guid is a property attached to taxonomy terms by taxonomy_xml
@@ -200,18 +243,21 @@ function taxonomy_xml_fields_taxonomy_term_presave($term) {
       $_SESSION[TAXONOMY_XML_FIELDS_VAR]['new'] = TRUE;
     }
 
+    //namespaces
     $ns = taxonomy_xml_fields_get_namespaces($term->vid);
 
     if ($term->predicates && !empty($term->predicates)) {
 
+      //an array of the RDF predicates and the expected field machine names w/ stats
       $terms = taxonomy_xml_fields_get_vocab_terms($term->vid);
+      //boolean to let us know if we need to update the $terms in the $_SESSION
       $updated_terms = FALSE;
 
       foreach ($term->predicates as $predicate => $values) {
-
         $found = FALSE;
         foreach ($ns as $abbrev => $uri) {
           if (strstr($predicate, $uri)) {
+            
             $pred = substr($predicate, strlen($uri));
             $field = 'field_tx_' . $abbrev . '_' . $pred;
             $original_predicate = $abbrev . ':' . $pred;
@@ -226,7 +272,9 @@ function taxonomy_xml_fields_taxonomy_term_presave($term) {
               $updated_terms = TRUE;
             }
 
+            //if the corresponding field machine-name exists on the taxonomy_term, populate it
             if (property_exists($term, $field)) {
+              
               $term->{$field}[LANGUAGE_NONE] = taxonomy_xml_fields_get_values($values, 'value');
               $length = count($term->{$field}[LANGUAGE_NONE]);
 
@@ -237,6 +285,8 @@ function taxonomy_xml_fields_taxonomy_term_presave($term) {
 
               //clear longest so field_sql_storage can save the data
               unset($term->{$field}[LANGUAGE_NONE]['longest']);
+             
+            //else, make a note that this RDF property doesn't have a corresponding field yet
             } else if (!$terms[$original_predicate]['new']) {
 
               //new property possibly
@@ -255,15 +305,32 @@ function taxonomy_xml_fields_taxonomy_term_presave($term) {
         taxonomy_xml_fields_set_vocab_terms($term->vid, $terms);
       }
     }
+    
+    //in case we are updating a vocabulary, make sure children get updated too
+    taxonomy_xml_fields_add_all_children_to_queue($term);
   }
-
-  taxonomy_xml_fields_add_all_children_to_queue($term);
 }
 
+/*
+ * Remember stats about RDF properties for potential taxonomy_term fields
+ * 
+ * 1) how many occurences => 'length'
+ * 2) # of characters     => 'size'
+ * 
+ * @param $field
+ *   An array of all the values for an RDF property
+ * @param $predicate
+ *   The associated RDF predicate 
+ * @param &$terms
+ *   The array of RDF properties that could potentially be taxonomy_term fields
+ * @return 
+ *   a BOOL specifying whether the field statistics have new values
+ */
 function taxonomy_xml_fields_analyze_field_data($field, $predicate, &$terms) {
 
   $updated_terms = FALSE;
   $length = count($field);
+  //since this field stores a 'longest' value, if that exists, don't count that as an occurence of multiple values
   if (array_key_exists('longest', $field)) {
     $length--;
   }
@@ -272,6 +339,7 @@ function taxonomy_xml_fields_analyze_field_data($field, $predicate, &$terms) {
     $updated_terms = TRUE;
   }
 
+  //keep track of the longest character count for all the values of an RDF property
   $size = $field['longest'];
   if ($terms[$predicate]['size'] < $size) {
     $terms[$predicate]['size'] = $size;
@@ -281,6 +349,19 @@ function taxonomy_xml_fields_analyze_field_data($field, $predicate, &$terms) {
   return $updated_terms;
 }
 
+/*
+ * Return an array we can directly attach to a taxonomy_term field to store its values
+ * 
+ * We can potentially use this later for storing more than just fields storing data with the 'value' identifier
+ * 
+ * @param $values
+ *   An array of values for an RDF property
+ * @param $store_name
+ *   The taxonomy_term field widgets store name for saving data (In most cases, this is 'value')
+ *   i.e. field_text[<lang>][delta][store_name] => field_text['und']['0']['value']
+ * @return 
+ *   The array that can be attached to the corresponding field on the taxonomy_term
+ */
 function taxonomy_xml_fields_get_values($values, $store_name) {
   $field_value = array();
   $longest_value = 0;
@@ -291,10 +372,19 @@ function taxonomy_xml_fields_get_values($values, $store_name) {
       $longest_value = $len;
     }
   }
+  //remember, the longest character count of all the values for the statistics
   $field_value['longest'] = $longest_value;
   return $field_value;
 }
 
+/*
+ * Helper function for retrieving namespaces related to a vocabulary import
+ * 
+ * @param $vid
+ *   The taxonomy_vocabulary vid
+ * @return 
+ *   An array of vocabulary URIs indexed by their abbreviation
+ */
 function taxonomy_xml_fields_get_namespaces($vid) {
   $ns_id = TAXONOMY_XML_FIELDS_NAMESPACES_VAR . ':' . $vid;
 
@@ -307,22 +397,54 @@ function taxonomy_xml_fields_get_namespaces($vid) {
   return $_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id];
 }
 
+/*
+ * Implements hook_taxonomy_xml_fields_namespaces($namespaces)
+ * 
+ * Fix the rdf_get_namespaces() for 'dc' and assign it's use of 'dc' to 'dcterms'
+ * 
+ * @param $namespaces
+ *   The current array of namespaces
+ * @return
+ *   The altered array of namespaces
+ */
 function taxonomy_xml_fields_taxonomy_xml_fields_namespaces($namespaces) {
   $namespaces['dc'] = 'http://purl.org/dc/elements/1.1/';
   $namespaces['dcterms'] = 'http://purl.org/dc/terms/';
   return $namespaces;
 }
 
+/*
+ * Helper function for storing the namespaces in the $_SESSION
+ * 
+ * @param $vid
+ *   The taxonomy_vocabulary vid
+ * @param $ns
+ *   The array of namespaces
+ */
 function taxonomy_xml_fields_set_namespaces($vid, $ns) {
   $ns_id = TAXONOMY_XML_FIELDS_NAMESPACES_VAR . ':' . $vid;
   $_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id] = $ns;
 }
 
+/*
+ * Helper function for clearing the namespaces in the $_SESSION
+ * 
+ * @param $vid
+ *   The taxonomy_vocabulary vid
+ */
 function taxonomy_xml_fields_clear_namespaces($vid) {
   $ns_id = TAXONOMY_XML_FIELDS_NAMESPACES_VAR . ':' . $vid;
   unset($_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id]);
 }
 
+/*
+ * Helper function for retrieving vocabulary field terms related to an import
+ * 
+ * @param $vid
+ *   The taxonomy_vocabulary vid
+ * @return 
+ *   An array of vocabulary terms potentially related to taxonomy_term feilds
+ */
 function taxonomy_xml_fields_get_vocab_terms($vid) {
   $vocab_terms_id = TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR . ':' . $vid;
 
@@ -336,16 +458,36 @@ function taxonomy_xml_fields_get_vocab_terms($vid) {
   return $_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id];
 }
 
+/*
+ * Helper function for storing the vocab_terms in the $_SESSION
+ * 
+ * @param $vid
+ *   The taxonomy_vocabulary vid
+ * @param $terms
+ *   The array of terms
+ */
 function taxonomy_xml_fields_set_vocab_terms($vid, $terms) {
   $vocab_terms_id = TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR . ':' . $vid;
   $_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id] = $terms;
 }
 
+/*
+ * Helper function for clearing the vocab terms in the $_SESSION
+ * 
+ * @param $vid
+ *   The taxonomy_vocabulary vid
+ */
 function taxonomy_xml_fields_clear_vocab_terms($vid) {
   $vocab_terms_id = TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR . ':' . $vid;
   unset($_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id]);
 }
 
+/*
+ * Helper function for retrieving taxonomy_term parents in an import
+ * 
+ * @return 
+ *   An array of taxonomy_term parent tids
+ */
 function taxonomy_xml_fields_get_parents(){
   if( !empty($_SESSION[TAXONOMY_XML_FIELDS_VAR]) && $_SESSION[TAXONOMY_XML_FIELDS_VAR][TAXONOMY_XML_FIELDS_PARENTS_VAR] ){
     return $_SESSION[TAXONOMY_XML_FIELDS_VAR][TAXONOMY_XML_FIELDS_PARENTS_VAR];
@@ -353,6 +495,14 @@ function taxonomy_xml_fields_get_parents(){
   return array();
 }
 
+/*
+ * Helper function for adding a taxonomy_term parent to a storage array in $_SESSION
+ * 
+ * @param $term
+ *   The parent taxonomy_term tid 
+ * @param $parents
+ *   The array to store the tid 
+ */
 function taxonomy_xml_fields_add_parent($term, $parents = array()){
   $parents[] = $term->tid;
   $_SESSION[TAXONOMY_XML_FIELDS_VAR][TAXONOMY_XML_FIELDS_PARENTS_VAR] = $parents;
