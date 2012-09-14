@@ -1,0 +1,276 @@
+<?php
+
+define('TAXONOMY_XML_FIELDS_VAR','taxonomy_xml_fields');
+define('TAXONOMY_XML_FIELDS_NAMESPACES_VAR', TAXONOMY_XML_FIELDS_VAR.'_namespaces');
+define('TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR',TAXONOMY_XML_FIELDS_VAR.'_vocab_terms');
+
+/*
+ * Implements hook_menu()
+ */
+function taxonomy_xml_fields_menu(){
+  $items['admin/structure/taxonomy/%/hierarchy'] = array(
+    'type' => MENU_LOCAL_TASK,
+    'access callback' => 'user_access',
+    'access arguments' => array('administer taxonomy'),
+    'page callback' => 'taxonomy_xml_fields_hierarchy',
+    'page arguments' => array('admin/structure/taxonomy_manager/voc/',3),
+    'title' => 'Hierarchy',
+    'title callback' => 't',
+    'weight' => '99',
+  );
+  
+  return $items;
+}
+
+/**
+ * Implements hook_help(). 
+ */
+function taxonomy_xml_fields_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#taxonomy_xml_fields':
+      // Return a line-break version of the module README.txt
+      return check_markup(file_get_contents(dirname(__FILE__) . "/README.txt"));
+  }
+}
+
+function taxonomy_xml_fields_hierarchy($path, $taxonomy_name){
+  drupal_goto($path.$taxonomy_name);
+}
+
+/*
+ * Implements hook_batch_alter(&$batch).
+ * 
+ * If the bath process is for 'taxonomy_xml' & its type is 'rdf',
+ * then modify the batch process to work for this module
+ */
+function taxonomy_xml_fields_batch_alter(&$batch) {
+  
+  if( $batch['sets']['0']['operations']['0']['0'] == 'taxonomy_xml_cached_get_contents'){
+    $type = $batch['sets']['0']['operations']['0']['1']['1']['format'];
+    
+    if($type == 'rdf'){
+        $vocabulary_url = $batch['sets']['0']['operations']['0']['1']['0'];
+        $vid = $batch['sets']['0']['operations']['0']['1']['1']['vid'];
+        
+        $_SESSION[TAXONOMY_XML_FIELDS_VAR] = array(
+          'vid' => $vid,
+          'vocabulary' => $vocabulary_url,
+          'new' => $vid == -1,
+        );
+        
+        $batch['sets']['0']['finished'] = 'taxonomy_xml_fields_batch_import_finished';
+    }  
+  }
+}
+
+/**
+ * Finalization callback when a round is done.
+ *
+ * @ingroup batch_operations
+ */
+function taxonomy_xml_fields_batch_import_finished($success, $results, $operations) {
+    
+  $vid = $_SESSION[TAXONOMY_XML_FIELDS_VAR]['vid'];
+  
+  $terms = taxonomy_xml_fields_get_vocab_terms($vid);
+  
+  if( $terms ){
+    
+    $old = array();
+    
+    $term_msg = '<p>Based on the vocabulary, you may store more information in your taxonomy terms by creating the following text fields:<br/><ul>';
+    foreach($terms as $predicate => $field){
+      if( $predicate != TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR ){
+        if(!$field['new']){
+          $old[$predicate] = $field;
+          continue;
+        }
+        
+        $term_msg .= '<li><strong>'.$predicate.' => '.$field['field'].
+                     ' (# of values: '.$field['length'].', longest text size: '.$field['size'].')</strong></li>';
+      }
+    }
+    
+    if( !empty($old) ){
+      $term_msg .= '</ul><br/>Pre-existing taxonomy fields that were populated during this import:<br/><ul>';
+      foreach($old as $predicate => $field){
+        $term_msg .= '<li>'.$predicate.' => '.$field['field'].' (# of values: '.$field['length'].', longest text size: '.$field['size'].')</li>';
+      }
+    }
+    $term_msg .= '</ul><br/>NOTE: make sure to set the \'Number of values:\' properly for fields above with sizes greater than 1.</p>';
+    
+    drupal_set_message($term_msg);
+  }
+  
+  unset($_SESSION[TAXONOMY_XML_FIELDS_VAR]);
+    
+  taxonomy_xml_batch_import_finished($success, $results, $operations);
+}
+
+
+
+
+/*
+ * Implements hook_taxonomy_term_presave($term). 
+ */
+
+function taxonomy_xml_fields_taxonomy_term_presave($term) {
+  
+  //guid is a property attached to taxonomy terms by taxonomy_xml
+  if ($term->guid) {
+    
+    if( $_SESSION[TAXONOMY_XML_FIELDS_VAR]['vid'] != $term->vid ){
+      //new taxonomy_vocabulary
+      $_SESSION[TAXONOMY_XML_FIELDS_VAR]['vid'] = $term->vid;
+      $_SESSION[TAXONOMY_XML_FIELDS_VAR]['new'] = TRUE;
+    }
+    
+    $ns = taxonomy_xml_fields_get_namespaces($term->vid);
+
+    if ($term->type == $ns['skos'] . 'Concept') {
+      
+      if ($term->predicates && !empty($term->predicates)) {
+
+        $terms = taxonomy_xml_fields_get_vocab_terms($term->vid);
+        $updated_terms = FALSE;
+        
+        foreach ($term->predicates as $predicate => $values) {
+
+          $found = FALSE;
+          foreach ($ns as $abbrev => $uri) {
+            if (strstr($predicate, $uri)) {
+              $pred = substr($predicate, strlen($uri));
+              $field = 'field_tx_' . $abbrev . '_' . $pred;
+              $original_predicate = $abbrev.':'.$pred;
+              
+              if(!array_key_exists($original_predicate, $terms) ){
+                $terms[$original_predicate] = array(
+                  'field' => $field,
+                  'length' => 1,
+                  'size' => 0,
+                  'new' => FALSE,
+                );
+                $updated_terms = TRUE;
+              }
+
+              if (property_exists($term, $field)) {
+                $term->{$field}[LANGUAGE_NONE] = taxonomy_xml_fields_get_values($values, 'value');
+                $length = count($term->{$field}[LANGUAGE_NONE]);
+                
+                $updated = taxonomy_xml_fields_analyze_field_data($term->{$field}[LANGUAGE_NONE], $original_predicate, $terms);
+                if( $updated ){
+                  $updated_terms = TRUE;
+                }
+                
+                //clear longest so field_sql_storage can save the data
+                unset($term->{$field}[LANGUAGE_NONE]['longest']);
+                
+              } else if( !$terms[$original_predicate]['new'] ){
+                
+                //new property possibly
+                $terms[$original_predicate]['new'] = TRUE;
+                $updated_terms = TRUE;
+                
+                taxonomy_xml_fields_analyze_field_data( taxonomy_xml_fields_get_values($values, 'value'), $original_predicate, $terms);
+              }
+              $found = TRUE;
+              break;
+            }
+          } 
+        }
+        
+        if( $updated_terms ){
+          taxonomy_xml_fields_set_vocab_terms($term->vid, $terms);
+        }
+      }
+    }
+  }
+}
+
+function taxonomy_xml_fields_analyze_field_data($field, $predicate, &$terms){
+  
+  $updated_terms = FALSE;
+  $length = count($field);
+  if( array_key_exists('longest', $field) ){
+    $length--;
+  }
+  if( $terms[$predicate]['length'] < $length ){
+    $terms[$predicate]['length'] = $length;
+    $updated_terms = TRUE;
+  }
+
+  $size = $field['longest'];
+  if( $terms[$predicate]['size'] < $size ){
+    $terms[$predicate]['size'] = $size;
+    $updated_terms = TRUE;
+  }
+  
+  return $updated_terms;
+}
+
+function taxonomy_xml_fields_get_values($values, $store_name) {
+  $field_value = array();
+  $longest_value = 0;
+  foreach ($values as $delta => $value) {
+    $field_value[$delta][$store_name] = $value;
+    $len = strlen($value);
+    if( $len > $longest_value ){
+      $longest_value = $len;
+    }
+  }
+  $field_value['longest'] = $longest_value;
+  return $field_value;
+}
+
+
+function taxonomy_xml_fields_get_namespaces($vid) {
+  $ns_id = TAXONOMY_XML_FIELDS_NAMESPACES_VAR . ':' . $vid;
+  $ns = $_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id];
+  
+  if (empty($ns) ){
+
+    $ns = rdf_get_namespaces();
+    $ns['dc'] = 'http://purl.org/dc/elements/1.1/';
+    $ns['dcterms'] = 'http://purl.org/dc/terms/';
+
+    module_invoke_all('hook_taxonomy_xml_fields_namespaces', $ns);
+
+    taxonomy_xml_fields_set_namespaces($vid, $ns);
+  }
+  return $ns;
+}
+
+function taxonomy_xml_fields_set_namespaces($vid, $ns){
+  $ns_id = TAXONOMY_XML_FIELDS_NAMESPACES_VAR . ':' . $vid;
+  $_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id] =  $ns;
+}
+
+
+function taxonomy_xml_fields_clear_namespaces($vid) {
+  $ns_id = TAXONOMY_XML_FIELDS_NAMESPACES_VAR . ':' . $vid;
+  unset($_SESSION[TAXONOMY_XML_FIELDS_VAR][$ns_id]);
+}
+
+
+function taxonomy_xml_fields_get_vocab_terms($vid) {
+  $vocab_terms_id = TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR . ':' . $vid;
+  $terms = $_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id];
+
+  if ( empty($terms) ){
+    $terms = array(
+      TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR => $vid,
+    );
+    taxonomy_xml_fields_set_vocab_terms($vid, $terms);
+  }
+  return $terms;
+}
+
+function taxonomy_xml_fields_set_vocab_terms($vid, $terms){
+  $vocab_terms_id = TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR . ':' . $vid;
+  $_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id] =  $terms;
+}
+
+function taxonomy_xml_fields_clear_vocab_terms($vid) {
+  $vocab_terms_id = TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR . ':' . $vid;
+  unset($_SESSION[TAXONOMY_XML_FIELDS_VAR][$vocab_terms_id]);
+}
