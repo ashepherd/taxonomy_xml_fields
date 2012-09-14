@@ -1,0 +1,12 @@
+name = Taxonomy Import XML w/ Term Fields
+description = Import the XML and populate taxonomy term fields based on xml properties
+dependencies[] = taxonomy_xml
+dependencies[] = taxonomy_manager
+package = "Taxonomy"
+core=7.x
+
+
+;TO-DO
+; 1) test the hook
+; 2) document
+; 3) rename
