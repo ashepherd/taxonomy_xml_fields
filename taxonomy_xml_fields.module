@@ -306,8 +306,10 @@ function taxonomy_xml_fields_taxonomy_term_presave($term) {
       }
     }
     
-    //in case we are updating a vocabulary, make sure children get updated too
-    taxonomy_xml_fields_add_all_children_to_queue($term);
+    if( !$_SESSION[TAXONOMY_XML_FIELDS_VAR]['new'] ){
+      //in case we are updating a vocabulary, make sure children get updated too
+      taxonomy_xml_fields_add_all_children_to_queue($term);
+    }
   }
 }
 
