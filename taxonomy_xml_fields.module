@@ -191,7 +191,6 @@ function taxonomy_xml_fields_batch_import_finished($success, $results, $operatio
     //Display the message that details the field possibilities
     $term_msg = '<p>Based on the vocabulary, you may store more information in your taxonomy terms '.
                 'by creating the fields with a machine name that starts with one of the following:<br/><ul>';
-    dpm($terms,'terms');
     foreach ($terms as $predicate => $field) {
       if ($predicate != TAXONOMY_XML_FIELDS_VOCAB_TERMS_VAR) {
         if (!$field['new']) {
